@@ -1,106 +1,207 @@
-import React from "react";
-import ReactDom from "react-dom";
-
-let isMount = true;
-let workInProgressHook = {};
-
-const fiber = {
-    memoizedState: null, 
-    stateNode: App
-};
-
-const Dispatcher = ( () => {
-    //mount时调用,并设置当前的hook
-    function mountWorkInProgressHook() {
-        const hook = {
-            queue: {
-                pending: null
-            },
-            memoizedState: null, 
-            next: null
-        };
-        if(!fiber.memoizedState) {
-            fiber.memoizedState = hook;
-        } else {
-            workInProgressHook.next = hook;
-        }
-        workInProgressHook = hook;
-        return workInProgressHook;
-    }
-
-    //update时调用,并将下一个hook设置当前的hook
-    function updateWorkInProgressHook(){
-        let curentHook = workInProgressHook;
-        workInProgressHook = workInProgressHook.next;
-        return curentHook;
-    }
-
-    function useState(initialState) {
-        let hook;
-        if(isMount) {
-            hook = mountWorkInProgressHook();
-            hook.memoizedState = initialState;
-        } else {
-            hook = updateWorkInProgressHook();
-        }
-
-        let baseState = hook.memoizedState;
-        if(hook.queue.pending) {
-            let firstPendingUpdate = hook.queue.pending.next;
-            // 循环update链表,通过update的action计算state
-            do {
-                const action = firstPendingUpdate.action;
-                baseState = action(baseState);
-                firstPendingUpdate = firstPendingUpdate.next;
-            } while(firstPendingUpdate !== hook.queue.pending)
-            //重置update链表
-            hook.queue.pending = null;  
-        }
-        //赋值新的state
-        hook.memoizedState = baseState;
-        
-        return [baseState, dispatchAction.bind(null, hook.queue)];
-    }
-
+function createElement(type, props, ...children) {
     return {
-        useState
-    };
-})();
-//触发更新
-function dispatchAction(queue, action) {
-    const update = {
-        action,
-        next: null
-    };
-    if(queue.pending === null) {
-        //update的环状链表
-        update.next = update;
-    } else {
-        //新的update的next指向前一个update
-        update.next = queue.pending.next;
-        //前一个update的next指向新的update
-        queue.pending.next = update;
+        type,
+        props: {
+            ...props,
+            children: children.map(child => typeof child === "object" ? child : createTextElement(child))
+        }
     }
-    queue.pending = update;
-
-    isMount = false;
-    workInProgressHook = fiber.memoizedState;
-    //调度
-    schedule();
 }
 
-function App(){
-    let [count, setCount] = Dispatcher.useState(1);
-    return (
-        <>
-            <p>Clicked me {count} times</p>
-            <button onClick={() => setCount(() => count + 1)}> Add count</button>
-        </>
-    )
+function createTextElement(text){
+    return {
+        type: "TEXT_ELEMENT",
+        props: {
+            nodeValue: text,
+            children: []
+        }
+    }
 }
 
-function schedule() {
-    ReactDom.render(<App />, document.querySelector("#root"));
+function commitRoot(){
+    deletions.forEach(commitWork)
+    commitWork(wipRoot.child)
+    currentRoot = wipRoot;
+    wipRoot = null;
+
+}
+function commitWork(fiber) {
+    if(!fiber) return
+    const domParent = fiber.parent.dom;
+    if(fiber.effectTag === 'PLACEMENT' && fiber.dom !== null) {
+        domParent.appendChild(fiber.dom)
+    } else if(fiber.effectTag === "UPDATE" && fiber.dom !== null){
+        updateDom(fiber.dom, fiber.alternate.props, fiber.props)
+    } else if(fiber.effectTag === "DELLETION") {
+        domParent.removeChild(fiber.dom);
+    }
+    commitWork(fiber.child)
+    commitWork(fiber.sibling)
 }
 
-schedule();
+let nextUnitOfWork = null
+let currentRoot = null
+let wipRoot = null
+let deletions = null
+
+function createDom(fiber){
+    const dom =  fiber.type === "TEXT_ELEMENT" ? document.createTextNode(''): document.createElement(fiber.type)
+    updateDom(dom, {}, fiber.props)
+    return dom
+}
+
+const isEvent = (key) => key.startsWith('on')
+const isProperty =(key) => key !== "children" && !isEvent(key)
+const isNew = (prev, next) =>(key) => prev[key] !== next[key];
+const isGone = (prev, next) => key => !(key in next);
+
+function updateDom(dom, prevProps, nextProps){
+    //删除节点事件
+    Object.keys(prevProps)
+    .filter(isEvent)
+    .filter((key) => !(key in nextProps) || isNew(prevProps, nextProps)())
+    .forEach(name => {
+        const eventType = name.toLowerCase.substring(2)
+        dom.remveEventListener(eventType, prevProps[name])
+    })
+
+    //删除属性
+    Object.keys(prevProps)
+    .filter(isProperty)
+    .filter(isGone(prevProps, nextProps))
+    .forEach((name) => {
+        dom[name] = ""
+    })
+
+    //新增属性
+
+    Object.keys(nextProps)
+    .filter(isProperty)
+    .filter(isNew(prevProps, nextProps))
+    .forEach( name => {
+        dom[name] = nextProps[name]
+    })
+
+    // 新增事件
+    Object.keys(nextProps)
+    .filter(isEvent)
+    .filter(isNew(prevProps, nextProps))
+    .forEach(name => {
+        const eventType = name.toLowerCase().substring(2)
+        dom.addEventListener(eventType, nextProps[name])
+    })
+}
+
+
+function render(element, container){  // 创建render之前先定义上面变量
+    wipRoot = {
+        dom: container,
+        props: {
+            children: [element],
+        },
+        alternate: currentRoot,
+    };
+    deletions = [];
+    nextUnitOfWork = wipRoot
+}
+
+function workLoop(deadline){
+    let shouldYield = false
+    while(nextUnitOfWork && !shouldYield) {
+        nextUnitOfWork = performUnitOfWork(nextUnitOfWork)
+        shouldYield = deadline.timeRemaining() < 1;
+    }
+    if(!nextUnitOfWork && wipRoot){
+        commitRoot();
+    }
+    requestIdleCallback(workLoop)
+}
+
+requestIdleCallback(workLoop)
+function performUnitOfWork(fiber){
+    if(!fiber.dom) {
+        fiber.dom = createDom(fiber)
+    }
+    const elements = fiber.props.children;
+    reconcileChildren(fiber, elements);
+    if(fiber.child){
+        return fiber.child
+    }
+    let nextFiber = fiber;
+    while(nextFiber) {
+        if(nextFiber.sibling) {
+            return nextFiber.sibling
+        }
+        nextFiber = nextFiber.parent;
+    }
+}
+
+//调协节点
+function reconcileChildren(wipFiber, elements) {
+    let index = 0;
+    let oldFiber = wipFiber.alternate && wipFiber.alternate.child;
+    let prevSibling = null;
+    while (index < elements.length || (oldFiber !== null && oldFiber !== undefined)) {
+      const element = elements[index];
+      let newFiber = null;
+  
+      const sameType = oldFiber && element && element.type === oldFiber.type;
+  
+      if (sameType) {
+        newFiber = {
+          type: oldFiber.type,
+          props: element.props,
+          dom: oldFiber.dom,
+          parent: wipFiber,
+          alternate: oldFiber,
+          effectTag: "UPDATE",
+        };
+      }
+      if (element && !sameType) {
+        newFiber = {
+          type: element.type,
+          props: element.props,
+          dom: null,
+          parent: wipFiber,
+          alternate: null,
+          effectTag: "PLACEMENT",
+        };
+      }
+      if (oldFiber && !sameType) {
+        oldFiber.effectTag = "DELETION";
+        deletions.push(oldFiber);
+      }
+  
+      if (oldFiber) {
+        oldFiber = oldFiber.sibling;
+      }
+  
+      if (index === 0) {
+        wipFiber.child = newFiber;
+      } else if (element) {
+        prevSibling.sibling = newFiber;
+      }
+      prevSibling = newFiber;
+      index++;
+    }
+  }
+
+const React = {
+    createElement,
+    render
+}
+const container = document.getElementById("root")
+
+const updateValue = (e) => {
+    rerender(e.target.value)
+}
+
+const rerender = (value) => {
+    const element = (<div>
+        <input onInput={updateValue} value={value}></input>
+        <h2> hello react {value} </h2>
+    </div>);
+    React.render(element, container)
+}
+
+rerender("World");
